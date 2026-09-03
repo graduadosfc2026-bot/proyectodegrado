@@ -1,0 +1,95 @@
+# ---------------------------------------------------------------------------
+# Configuracion del sistema de pronostico de demanda de repuestos
+# agroindustriales. Todos los pasos del pipeline leen de este archivo.
+# ---------------------------------------------------------------------------
+
+proyecto:
+  nombre: pronostico-repuestos-agroindustriales
+  semilla: 42
+  directorio_datos_crudos: datos/crudos
+  directorio_datos_procesados: datos/procesados
+  directorio_modelos: artefactos/modelos
+  directorio_reportes: artefactos/reportes
+
+datos:
+  # Granularidad temporal de trabajo: "S" (semanal, lunes) o "MS" (mensual).
+  frecuencia: S
+  # Columna objetivo luego de agregar los movimientos de venta.
+  columna_objetivo: cantidad
+  # Se descartan SKU con menos de esta cantidad de periodos de historia.
+  min_periodos_historia: 52
+  # Se descartan SKU cuya demanda total historica sea menor a este umbral.
+  min_demanda_total: 12
+  # Recorta la demanda al cuantil indicado para amortiguar outliers extremos
+  # (null desactiva el winsorizado).
+  winsorizar_cuantil: 0.995
+
+simulacion:
+  # Parametros del generador de datos sinteticos (datos de demostracion).
+  fecha_inicio: "2019-01-01"
+  fecha_fin: "2024-12-31"
+  n_skus: 120
+  n_clientes: 60
+  proporcion_intermitentes: 0.55
+  probabilidad_promocion: 0.05
+  probabilidad_quiebre_stock: 0.03
+
+caracteristicas:
+  # Rezagos de la demanda (en periodos de la frecuencia elegida).
+  rezagos: [1, 2, 3, 4, 6, 8, 12, 26, 52]
+  # Ventanas para estadisticos moviles (media, desvio, maximo, ceros).
+  ventanas_moviles: [4, 8, 13, 26, 52]
+  # Periodo estacional: 52 para semanal, 12 para mensual.
+  periodo_estacional: 52
+  # Cantidad de pares de terminos de Fourier para la estacionalidad anual.
+  ordenes_fourier: 3
+  # Incluir variables de campana agricola (siembra / cosecha).
+  usar_calendario_agricola: true
+  # Incluir atributos estaticos del catalogo de repuestos.
+  usar_atributos_sku: true
+
+modelo:
+  # Nombre del modelo principal registrado en pronostico.modelos.registro.
+  nombre: gbrt_global
+  # Horizonte de pronostico en periodos.
+  horizonte: 13
+  # Cuantiles a estimar para dimensionar stock de seguridad.
+  cuantiles: [0.5, 0.8, 0.9, 0.95]
+  # Modelos de referencia contra los que se compara el modelo principal.
+  referencias: [naive, naive_estacional, media_movil, croston, sba]
+  # Ponderacion por recencia: 1.0 pesa toda la historia por igual; valores como
+  # 0.98 hacen que la historia antigua pese menos (util si cambio el surtido).
+  decaimiento_temporal: 1.0
+  hiperparametros:
+    max_iter: 300
+    learning_rate: 0.06
+    max_depth: 6
+    min_samples_leaf: 30
+    l2_regularization: 1.0
+    max_bins: 128
+    early_stopping: false
+
+validacion:
+  # Backtesting de origen movil.
+  n_origenes: 4
+  # Separacion en periodos entre origenes consecutivos.
+  paso_origenes: 4
+  # Periodos finales reservados como conjunto de prueba final.
+  periodos_prueba: 13
+  # Metrica usada para elegir el modelo ganador.
+  metrica_seleccion: wape
+  # Evaluar tambien la calibracion de los cuantiles durante el backtesting.
+  # Multiplica el tiempo de entrenamiento por la cantidad de cuantiles.
+  evaluar_cuantiles: false
+
+inventario:
+  # Nivel de servicio objetivo (ciclo) usado para el stock de seguridad.
+  nivel_servicio: 0.95
+  # Lead time por defecto en dias cuando el catalogo no lo informa.
+  lead_time_dias_por_defecto: 21
+  # Periodo de revision del inventario en dias.
+  periodo_revision_dias: 7
+  # Clasificacion ABC por participacion acumulada en el valor de demanda.
+  cortes_abc: [0.8, 0.95]
+  # Cortes de coeficiente de variacion para la clasificacion XYZ.
+  cortes_xyz: [0.5, 1.0]
