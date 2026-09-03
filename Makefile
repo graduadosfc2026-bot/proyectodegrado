@@ -3,7 +3,7 @@
 VENV ?= .venv
 PY   := $(VENV)/bin/python
 
-.PHONY: instalar datos entrenar predecir reponer importancia test limpiar todo
+.PHONY: instalar datos diagnostico entrenar predecir reponer importancia test limpiar todo
 
 instalar:      ## Crea el entorno virtual e instala el proyecto
 	python3 -m venv $(VENV)
@@ -12,6 +12,9 @@ instalar:      ## Crea el entorno virtual e instala el proyecto
 
 datos:         ## Genera el conjunto de datos sintetico de demostracion
 	$(PY) -m pronostico generar-datos
+
+diagnostico:   ## Revisa si los datos alcanzan para entrenar
+	$(PY) -m pronostico diagnostico
 
 entrenar:      ## Entrena, valida contra las referencias y guarda el modelo
 	$(PY) -m pronostico entrenar

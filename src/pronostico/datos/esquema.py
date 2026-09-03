@@ -60,6 +60,30 @@ class ErrorEsquema(ValueError):
     """Se lanza cuando una tabla de entrada no cumple el esquema esperado."""
 
 
+def aplicar_mapeo(df: pd.DataFrame, mapeo: dict[str, str] | None) -> pd.DataFrame:
+    """Renombra las columnas de origen a los nombres canonicos del proyecto.
+
+    Permite conectar una exportacion del ERP sin editar el archivo: el mapeo se
+    declara en `datos.mapeo_columnas` de la configuracion, con la forma
+    ``nombre_en_el_erp: nombre_canonico``.
+
+    Los nombres de origen que no aparecen en el archivo se ignoran, de modo que
+    un mismo mapeo sirve para exportaciones con distinto grado de detalle.
+    """
+    if not mapeo:
+        return df
+    presentes = {origen: destino for origen, destino in mapeo.items() if origen in df.columns}
+    if not presentes:
+        return df
+    colisiones = [d for d in presentes.values() if d in df.columns and d not in presentes]
+    if colisiones:
+        raise ErrorEsquema(
+            f"El mapeo de columnas crearia duplicados: {colisiones}. "
+            f"Elimine o renombre esas columnas en el archivo de origen."
+        )
+    return df.rename(columns=presentes)
+
+
 def validar_movimientos(df: pd.DataFrame) -> pd.DataFrame:
     """Valida y normaliza la tabla de movimientos de venta.
 

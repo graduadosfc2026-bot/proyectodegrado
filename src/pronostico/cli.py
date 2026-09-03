@@ -19,6 +19,7 @@ import pandas as pd
 
 from .config import Config, cargar_config
 from .datos import esquema as esq
+from .datos.diagnostico import diagnosticar, imprimir_diagnostico
 from .datos.sintetico import generar_conjunto_datos
 from .inventario.politica import resumen_politica
 from .modelos.registro import modelos_disponibles
@@ -29,7 +30,7 @@ from .pipeline.prediccion import (
     predecir_demanda,
     preparar_historia,
 )
-from .utilidades.persistencia import guardar_tabla, leer_tabla
+from .utilidades.persistencia import guardar_json, guardar_tabla, leer_tabla
 from .utilidades.registro_log import configurar_logging, obtener_logger
 
 logger = obtener_logger(__name__)
@@ -39,6 +40,7 @@ ARCHIVO_CATALOGO = "catalogo_skus.csv"
 ARCHIVO_PRONOSTICO = "pronostico.csv"
 ARCHIVO_PLAN = "plan_reposicion.csv"
 ARCHIVO_IMPORTANCIA = "importancia_variables.csv"
+ARCHIVO_DIAGNOSTICO = "diagnostico_datos.json"
 
 
 def _rutas_datos(config: Config, argumentos: argparse.Namespace) -> tuple[Path, Path]:
@@ -50,12 +52,25 @@ def _rutas_datos(config: Config, argumentos: argparse.Namespace) -> tuple[Path, 
 
 
 def _cargar_entradas(config: Config, argumentos: argparse.Namespace):
-    """Lee movimientos y catalogo desde disco."""
+    """Lee movimientos y catalogo, aplicando el mapeo de columnas configurado."""
     ruta_movimientos, ruta_catalogo = _rutas_datos(config, argumentos)
-    movimientos = leer_tabla(ruta_movimientos, columnas_fecha=[esq.COL_FECHA])
-    catalogo = leer_tabla(ruta_catalogo) if ruta_catalogo.exists() else None
-    if catalogo is None:
-        logger.warning("No se encontro el catalogo en %s: se entrena sin atributos de SKU", ruta_catalogo)
+    mapeo = config.obtener("datos.mapeo_columnas") or {}
+
+    # El mapeo se aplica antes de parsear fechas: la columna de fecha puede
+    # llamarse distinto en el archivo de origen.
+    movimientos = esq.aplicar_mapeo(leer_tabla(ruta_movimientos), mapeo)
+    if esq.COL_FECHA in movimientos.columns:
+        movimientos[esq.COL_FECHA] = pd.to_datetime(
+            movimientos[esq.COL_FECHA], errors="coerce", format=config.obtener("datos.formato_fecha")
+        )
+
+    catalogo = None
+    if ruta_catalogo.exists():
+        catalogo = esq.aplicar_mapeo(leer_tabla(ruta_catalogo), mapeo)
+    else:
+        logger.warning(
+            "No se encontro el catalogo en %s: se trabaja sin atributos de SKU", ruta_catalogo
+        )
     return movimientos, catalogo
 
 
@@ -151,6 +166,25 @@ def comando_reponer(argumentos: argparse.Namespace, config: Config) -> int:
     return 0
 
 
+def comando_diagnostico(argumentos: argparse.Namespace, config: Config) -> int:
+    """Evalua si los datos alcanzan para entrenar, sin entrenar nada."""
+    movimientos, catalogo = _cargar_entradas(config, argumentos)
+    seccion = config.seccion("datos")
+    informe = diagnosticar(
+        movimientos,
+        catalogo,
+        frecuencia=str(seccion.get("frecuencia", "S")),
+        min_periodos=int(seccion.get("min_periodos_historia", 52)),
+        min_demanda_total=float(seccion.get("min_demanda_total", 12)),
+        periodo_estacional=int(config.obtener("caracteristicas.periodo_estacional", 52)),
+        horizonte=int(config.obtener("modelo.horizonte", 13)),
+    )
+    imprimir_diagnostico(informe)
+    guardar_json(informe, config.ruta_de("proyecto.directorio_reportes") / ARCHIVO_DIAGNOSTICO)
+    # Codigo 2 = los datos no alcanzan, distinto de un fallo de ejecucion.
+    return 0 if informe.get("apto_para_entrenar") else 2
+
+
 def comando_importancia(argumentos: argparse.Namespace, config: Config) -> int:
     """Calcula la importancia por permutacion de las variables del modelo."""
     movimientos, _ = _cargar_entradas(config, argumentos)
@@ -187,29 +221,60 @@ def comando_info(argumentos: argparse.Namespace, config: Config) -> int:
 # ------------------------------------------------------------------- argumentos
 def construir_parser() -> argparse.ArgumentParser:
     """Define la interfaz de linea de comandos."""
+    # Las opciones comunes se declaran en un parser padre para que se acepten
+    # tanto antes como despues del subcomando.
+    #
+    # `argparse.SUPPRESS` es imprescindible aqui: al procesar el subcomando,
+    # argparse vuelca sobre el espacio de nombres principal todo lo que parseo
+    # el subparser, incluidos sus valores por defecto. Sin SUPPRESS, escribir
+    # `pronostico --config X entrenar` terminaria con `config = None`, porque el
+    # subparser lo pisaria. Con SUPPRESS la clave simplemente no existe cuando la
+    # opcion no se uso, y `_completar_opciones_comunes` pone el valor por defecto
+    # despues de parsear.
+    #
+    # Por el mismo motivo no se usa `parser.set_defaults`: ese metodo reescribe
+    # el atributo `default` de las acciones que coinciden, y `parents=` comparte
+    # esas acciones con los subparsers, con lo que anularia el SUPPRESS.
+    comunes = argparse.ArgumentParser(add_help=False)
+    comunes.add_argument(
+        "--config",
+        default=argparse.SUPPRESS,
+        help="Ruta del archivo YAML de configuracion",
+    )
+    comunes.add_argument(
+        "--verbose",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Muestra el detalle de la ejecucion",
+    )
+    comunes.add_argument(
+        "--movimientos", default=argparse.SUPPRESS, help="CSV de movimientos de venta"
+    )
+    comunes.add_argument(
+        "--catalogo", default=argparse.SUPPRESS, help="CSV del catalogo de SKU"
+    )
+
     parser = argparse.ArgumentParser(
         prog="pronostico",
+        parents=[comunes],
         description=(
             "Sistema de pronostico de demanda para repuestos de maquinaria "
             "agroindustrial."
         ),
     )
-    parser.add_argument("--config", help="Ruta del archivo YAML de configuracion")
-    parser.add_argument(
-        "--verbose", action="store_true", help="Muestra el detalle de la ejecucion"
-    )
-    parser.add_argument("--movimientos", help="CSV de movimientos de venta")
-    parser.add_argument("--catalogo", help="CSV del catalogo de SKU")
-
     subcomandos = parser.add_subparsers(dest="comando", required=True)
 
     p_datos = subcomandos.add_parser(
-        "generar-datos", help="Genera datos sinteticos de demostracion"
+        "generar-datos",
+        parents=[comunes],
+        help="Genera datos sinteticos de demostracion",
     )
     p_datos.add_argument("--n-skus", type=int, help="Cantidad de SKU a simular")
     p_datos.set_defaults(funcion=comando_generar_datos)
 
-    p_entrenar = subcomandos.add_parser("entrenar", help="Entrena y valida el modelo")
+    p_entrenar = subcomandos.add_parser(
+        "entrenar", parents=[comunes], help="Entrena y valida el modelo"
+    )
     p_entrenar.add_argument(
         "--sin-backtesting",
         action="store_true",
@@ -217,13 +282,17 @@ def construir_parser() -> argparse.ArgumentParser:
     )
     p_entrenar.set_defaults(funcion=comando_entrenar)
 
-    p_predecir = subcomandos.add_parser("predecir", help="Genera el pronostico de demanda")
+    p_predecir = subcomandos.add_parser(
+        "predecir", parents=[comunes], help="Genera el pronostico de demanda"
+    )
     p_predecir.add_argument("--modelo", help="Ruta del artefacto entrenado")
     p_predecir.add_argument("--horizonte", type=int, help="Periodos a pronosticar")
     p_predecir.add_argument("--filas", type=int, default=15, help="Filas a mostrar")
     p_predecir.set_defaults(funcion=comando_predecir)
 
-    p_reponer = subcomandos.add_parser("reponer", help="Calcula el plan de reposicion")
+    p_reponer = subcomandos.add_parser(
+        "reponer", parents=[comunes], help="Calcula el plan de reposicion"
+    )
     p_reponer.add_argument("--modelo", help="Ruta del artefacto entrenado")
     p_reponer.add_argument("--stock", help="CSV con las existencias actuales por SKU")
     p_reponer.add_argument(
@@ -234,8 +303,17 @@ def construir_parser() -> argparse.ArgumentParser:
     p_reponer.add_argument("--filas", type=int, default=15, help="Filas a mostrar")
     p_reponer.set_defaults(funcion=comando_reponer)
 
+    p_diagnostico = subcomandos.add_parser(
+        "diagnostico",
+        parents=[comunes],
+        help="Evalua si los datos alcanzan para entrenar, sin entrenar",
+    )
+    p_diagnostico.set_defaults(funcion=comando_diagnostico)
+
     p_importancia = subcomandos.add_parser(
-        "importancia", help="Calcula la importancia por permutacion de las variables"
+        "importancia",
+        parents=[comunes],
+        help="Calcula la importancia por permutacion de las variables",
     )
     p_importancia.add_argument("--modelo", help="Ruta del artefacto entrenado")
     p_importancia.add_argument(
@@ -250,15 +328,34 @@ def construir_parser() -> argparse.ArgumentParser:
     p_importancia.add_argument("--filas", type=int, default=20, help="Filas a mostrar")
     p_importancia.set_defaults(funcion=comando_importancia)
 
-    p_info = subcomandos.add_parser("info", help="Muestra la configuracion vigente")
+    p_info = subcomandos.add_parser(
+        "info", parents=[comunes], help="Muestra la configuracion vigente"
+    )
     p_info.set_defaults(funcion=comando_info)
     return parser
+
+
+# Opciones comunes y su valor cuando no se usan (ver `construir_parser`).
+OPCIONES_COMUNES: dict[str, object] = {
+    "config": None,
+    "verbose": False,
+    "movimientos": None,
+    "catalogo": None,
+}
+
+
+def _completar_opciones_comunes(argumentos: argparse.Namespace) -> argparse.Namespace:
+    """Rellena las opciones comunes que argparse omitio por `SUPPRESS`."""
+    for destino, por_defecto in OPCIONES_COMUNES.items():
+        if not hasattr(argumentos, destino):
+            setattr(argumentos, destino, por_defecto)
+    return argumentos
 
 
 def main(argv: list[str] | None = None) -> int:
     """Punto de entrada de la linea de comandos."""
     parser = construir_parser()
-    argumentos = parser.parse_args(argv)
+    argumentos = _completar_opciones_comunes(parser.parse_args(argv))
     configurar_logging(logging.DEBUG if argumentos.verbose else logging.INFO)
 
     try:

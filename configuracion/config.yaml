@@ -12,6 +12,13 @@ proyecto:
   directorio_reportes: artefactos/reportes
 
 datos:
+  # Renombra las columnas del archivo de origen a los nombres canonicos del
+  # proyecto, con la forma "nombre_en_el_erp: nombre_canonico". Sirve para
+  # conectar una exportacion del ERP sin editar el CSV. Vacio = sin mapeo.
+  mapeo_columnas: {}
+  # Formato de fecha del archivo de origen (por ejemplo "%d/%m/%Y").
+  # null deja que pandas lo infiera.
+  formato_fecha: null
   # Granularidad temporal de trabajo: "S" (semanal, lunes) o "MS" (mensual).
   frecuencia: S
   # Columna objetivo luego de agregar los movimientos de venta.

@@ -28,6 +28,10 @@ python -m pronostico reponer         # plan de compras a partir del pronostico
 python -m pronostico importancia     # que variables usa el modelo
 ```
 
+Con datos reales, el punto de partida es `python -m pronostico diagnostico`:
+revisa si los datos alcanzan para entrenar antes de entrenar nada. Ver
+[Usar los datos reales de la empresa](#usar-los-datos-reales-de-la-empresa).
+
 Sin argumentos, todos los comandos leen `configuracion/config.yaml`, toman los
 datos de `datos/crudos/` y escriben los resultados en `artefactos/`.
 
@@ -44,6 +48,12 @@ banco de pruebas de "verdad conocida": la demanda se arma con componentes
 explicitos que los modelos deben recuperar.
 
 Produce `datos/crudos/movimientos.csv` y `datos/crudos/catalogo_skus.csv`.
+
+### `diagnostico`
+
+Revisa si los datos alcanzan para entrenar, sin entrenar nada: cuanta historia
+hay, cuantos SKU sobreviven a los filtros, que tan intermitente es la demanda y
+que columnas opcionales faltan. Es el primer comando a correr con datos reales.
 
 ### `entrenar`
 
@@ -261,7 +271,8 @@ src/pronostico/
   config.py                      Carga de configuracion con acceso por ruta punteada
   cli.py                         Interfaz de linea de comandos
   datos/
-    esquema.py                   Esquema canonico y validacion de las tablas de entrada
+    esquema.py                   Esquema canonico, mapeo de columnas y validacion
+    diagnostico.py               Informe de aptitud de los datos antes de entrenar
     sintetico.py                 Generador de datos de demostracion
     preparacion.py               Panel regular, censura, filtros, ABC-XYZ y regimen
   caracteristicas/
@@ -287,11 +298,14 @@ tests/                           Pruebas unitarias y de integracion
 
 ## Usar los datos reales de la empresa
 
-El generador sintetico es solo para demostracion. Para conectar el sistema a los
-datos reales alcanza con exportar dos CSV con el esquema de
-`src/pronostico/datos/esquema.py`:
+El generador sintetico es solo para demostracion. Para trabajar con los datos de
+la empresa hay cuatro pasos.
 
-**`movimientos.csv`** — una fila por linea de venta o pedido.
+### 1. Exportar dos tablas del ERP
+
+**`movimientos.csv`** — una fila por linea de venta o pedido. **No agregues ni
+resumas nada**: el sistema hace la agregacion semanal por su cuenta, y necesita
+el detalle para contar operaciones y clientes por periodo.
 
 | Columna | Obligatoria | Descripcion |
 | --- | --- | --- |
@@ -308,23 +322,85 @@ datos reales alcanza con exportar dos CSV con el esquema de
 `maquina`, `criticidad`, `costo_unitario`, `precio_lista`, `lead_time_dias`,
 `origen_proveedor`, `lote_minimo`.
 
-Luego:
+### 2. Declarar el mapeo de columnas
 
-```bash
-python -m pronostico entrenar --movimientos ruta/a/movimientos.csv \
-                              --catalogo ruta/a/catalogo_skus.csv
+Casi ninguna exportacion trae los nombres canonicos. En vez de editar el CSV a
+mano cada vez, se declara la equivalencia en `configuracion/config.yaml`, con la
+forma `nombre_en_el_erp: nombre_canonico`:
+
+```yaml
+datos:
+  mapeo_columnas:
+    FECHA_COMPROBANTE: fecha
+    COD_ARTICULO: sku
+    CANT_FACTURADA: cantidad
+    PRECIO_UNIT: precio_unitario
+    DIAS_ENTREGA: lead_time_dias
+  formato_fecha: "%d/%m/%Y"    # null si la fecha ya viene como AAAA-MM-DD
 ```
 
-Dos recomendaciones al pasar a datos reales:
+Los nombres de origen que no aparezcan en el archivo se ignoran, asi que un
+mismo mapeo sirve para las dos tablas y para exportaciones con distinto detalle.
 
-1. **Registrar los quiebres de stock.** Sin esa columna, la demanda perdida
-   entra al modelo como demanda cero y el sistema aprende a comprar de menos
-   justo en los repuestos que mas faltan.
-2. **Revisar el calendario agricola.** Las ventanas de `CAMPANAS` en
-   `caracteristicas/calendario.py` corresponden al Cono Sur. Para otra region o
-   para otros cultivos hay que redefinirlas.
+### 3. Verificar que los datos alcanzan
 
----
+```bash
+python -m pronostico diagnostico --movimientos ruta/ventas.csv \
+                                 --catalogo ruta/articulos.csv
+```
+
+Este comando no entrena nada: revisa los datos y responde si son aptos.
+
+```
+=== Diagnostico de los datos ===
+  Movimientos validos               : 79,656
+  SKU con movimientos               : 120
+  Periodos de historia              : 314
+  SKU aptos para entrenar           : 120
+  Periodos sin demanda              : 34.2%
+  Regimen                           : {'intermitente': 63, 'suave': 51, ...}
+
+--- Advertencias ---
+  * El lead time mas largo del catalogo es de 120 dias (17 periodos) y el
+    horizonte es de 13: suba `modelo.horizonte` para cubrirlo.
+
+Los datos alcanzan para entrenar.
+```
+
+Separa **bloqueantes** (impiden entrenar: poca historia, ningun SKU apto) de
+**advertencias** (degradan el modelo pero no lo frenan: falta el registro de
+quiebres, faltan fichas en el catalogo, el lead time excede el horizonte).
+Devuelve codigo de salida 2 si los datos no alcanzan, para poder encadenarlo en
+un script.
+
+### 4. Entrenar y usar
+
+```bash
+python -m pronostico entrenar   --movimientos ruta/ventas.csv --catalogo ruta/articulos.csv
+python -m pronostico predecir   --movimientos ruta/ventas.csv
+python -m pronostico reponer    --movimientos ruta/ventas.csv --stock ruta/existencias.csv
+```
+
+Si en el YAML se apunta `proyecto.directorio_datos_crudos` a la carpeta de
+exportacion (con los archivos llamados `movimientos.csv` y `catalogo_skus.csv`),
+los `--movimientos` y `--catalogo` no hacen falta.
+
+Las opciones comunes (`--config`, `--movimientos`, `--catalogo`, `--verbose`)
+se aceptan tanto antes como despues del subcomando.
+
+El archivo de `--stock` es un CSV de dos columnas: `sku` y las existencias
+actuales. Con el, `reponer` devuelve directamente cuanto pedir de cada repuesto;
+sin el, devuelve el punto de reorden.
+
+### Que hace falta para que funcione bien
+
+| Requisito | Por que |
+| --- | --- |
+| **3 anos de historia o mas** | Con menos de 2 los rezagos estacionales quedan vacios y el modelo no puede aprender la campana. El diagnostico avisa. |
+| **Registrar los quiebres de stock** | Es la quinta variable mas importante del modelo. Sin ella, la demanda perdida entra como demanda cero y el sistema aprende a comprar de menos justo en los repuestos que mas faltan. |
+| **Horizonte que cubra el lead time** | `modelo.horizonte` debe ser mayor que el lead time mas largo del catalogo en periodos; si no, esos SKU se extrapolan con la demanda media. |
+| **Revisar el calendario agricola** | Las ventanas de `CAMPANAS` en `caracteristicas/calendario.py` son del Cono Sur. Para otra region o cultivo hay que redefinirlas. |
+| **Codigos de SKU estables** | Si el ERP recodifica un repuesto, para el sistema es un producto nuevo sin historia. Conviene unificar los codigos antes de exportar. |
 
 ## Configuracion
 
@@ -333,6 +409,7 @@ cambian el resultado:
 
 | Parametro | Efecto |
 | --- | --- |
+| `datos.mapeo_columnas` | Equivalencia entre los nombres del ERP y los canonicos. |
 | `datos.frecuencia` | `S` semanal o `MS` mensual. Al pasar a mensual hay que ajustar `periodo_estacional` a 12 y los rezagos. |
 | `modelo.horizonte` | Periodos a pronosticar. Debe cubrir el lead time mas largo del catalogo. |
 | `modelo.cuantiles` | Cuantiles a estimar. Cada uno multiplica el tiempo de entrenamiento. |
