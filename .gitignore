@@ -1,0 +1,22 @@
+# Entornos
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Datos y artefactos generados
+datos/crudos/*
+datos/procesados/*
+artefactos/modelos/*
+artefactos/reportes/*
+!**/.gitkeep
+
+# Sistema
+.DS_Store
